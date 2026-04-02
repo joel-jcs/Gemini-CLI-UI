@@ -662,17 +662,23 @@ async function getSessionMessages(projectName, sessionId) {
     try {
       const data = await fs.readFile(sessionFile, "utf8");
       const session = JSON.parse(data);
-      return (session.messages || []).map((m) => ({
+      const messages = (session.messages || []).map((m) => ({
         sessionId: sessionId,
         type: m.type,
         message: {
           role: m.type,
-          content: m.content,
+          content: m.content || "",
         },
         timestamp: m.timestamp || new Date().toISOString(),
       }));
+
+      // Sort messages by timestamp in ascending order
+      return messages.sort(
+        (a, b) =>
+          new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+      );
     } catch (e) {
-      return [];
+      // Fall through to check projects directory if not found in tmp
     }
   }
 
@@ -701,8 +707,22 @@ async function getSessionMessages(projectName, sessionId) {
         if (line.trim()) {
           try {
             const entry = JSON.parse(line);
-            if (entry.sessionId === sessionId) {
-              messages.push(entry);
+
+            // Only include entries for this session that have a message with a role
+            if (
+              entry.sessionId === sessionId &&
+              entry.message &&
+              entry.message.role
+            ) {
+              messages.push({
+                sessionId: sessionId,
+                type: entry.message.role,
+                message: {
+                  role: entry.message.role,
+                  content: entry.message.content || "",
+                },
+                timestamp: entry.timestamp || new Date().toISOString(),
+              });
             }
           } catch (parseError) {
             // console.warn('Error parsing line:', parseError.message);
@@ -711,9 +731,10 @@ async function getSessionMessages(projectName, sessionId) {
       }
     }
 
-    // Sort messages by timestamp
+    // Sort messages by timestamp in ascending order
     return messages.sort(
-      (a, b) => new Date(a.timestamp || 0) - new Date(b.timestamp || 0),
+      (a, b) =>
+        new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
     );
   } catch (error) {
     // console.error(`Error reading messages for session ${sessionId}:`, error);
