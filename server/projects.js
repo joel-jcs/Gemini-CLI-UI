@@ -493,75 +493,35 @@ async function getProjects() {
 }
 
 async function getSessions(projectName, limit = 5, offset = 0) {
-  // Check if this is a native hash (64 chars) or a base64 ID
-  const isNative = projectName.length === 64;
-  let projectDir;
-
-  if (isNative) {
-    projectDir = path.join(getGeminiDir(), "tmp", projectName, "chats");
-  } else {
-    projectDir = path.join(getGeminiDir(), "projects", projectName);
-  }
+  // Always look in the projects directory for native-first discovery
+  const projectDir = path.join(getGeminiDir(), "projects", projectName);
 
   try {
     const files = await fs.readdir(projectDir);
-    let sessionFiles;
-
-    if (isNative) {
-      sessionFiles = files.filter(
-        (file) => file.startsWith("session-") && file.endsWith(".json"),
-      );
-    } else {
-      sessionFiles = files.filter((file) => file.endsWith(".jsonl"));
-    }
+    const sessionFiles = files.filter((file) => file.endsWith(".jsonl"));
 
     if (sessionFiles.length === 0) {
       return { sessions: [], hasMore: false, total: 0 };
     }
 
-    // For performance, get file stats to sort by modification time
-    const filesWithStats = await Promise.all(
-      sessionFiles.map(async (file) => {
-        const filePath = path.join(projectDir, file);
-        const stats = await fs.stat(filePath);
-        return { file, mtime: stats.mtime };
-      }),
-    );
-
-    // Sort files by modification time (newest first) for better performance
-    filesWithStats.sort((a, b) => b.mtime - a.mtime);
-
     const allSessions = new Map();
-    let processedCount = 0;
 
-    // Process files in order of modification time
-    for (const { file } of filesWithStats) {
+    // Process all JSONL files to identify all unique sessionIds
+    for (const file of sessionFiles) {
       const filePath = path.join(projectDir, file);
-      let sessions;
-
-      if (isNative) {
-        const nativeSession = await parseNativeSession(filePath);
-        sessions = nativeSession ? [nativeSession] : [];
-      } else {
-        sessions = await parseJsonlSessions(filePath);
-      }
-
-      // Merge sessions, avoiding duplicates by session ID
-      sessions.forEach((session) => {
+      const fileSessions = await parseJsonlSessions(filePath);
+      
+      fileSessions.forEach((session) => {
         if (!allSessions.has(session.id)) {
           allSessions.set(session.id, session);
+        } else {
+          // Merge: update lastActivity if this file has more recent data
+          const existing = allSessions.get(session.id);
+          if (new Date(session.lastActivity) > new Date(existing.lastActivity)) {
+            allSessions.set(session.id, session);
+          }
         }
       });
-
-      processedCount++;
-
-      // Early exit optimization
-      if (
-        allSessions.size >= (limit + offset) * 2 &&
-        processedCount >= Math.min(3, filesWithStats.length)
-      ) {
-        break;
-      }
     }
 
     // Convert to array and sort by last activity
