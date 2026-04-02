@@ -66,6 +66,8 @@ function ToolsSettings({ isOpen, onClose }) {
   
   // Available Gemini models (tested and verified)
   const availableModels = [
+    { value: 'gemini-3-flash-preview', label: 'Gemini 3 Flash Preview', description: 'Next-generation fast model with advanced reasoning.' },
+    { value: 'gemini-3-pro-preview', label: 'Gemini 3 Pro Preview', description: 'Most capable next-generation model.' },
     { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash', description: 'Fast and efficient latest model (Recommended)' },
     { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', description: 'Most advanced model (Note: May have quota limits)' }
   ];
