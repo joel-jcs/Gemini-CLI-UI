@@ -66,7 +66,11 @@ const connectedClients = new Set();
 // Setup file system watcher for Gemini projects folder using chokidar
 async function setupProjectsWatcher() {
   const chokidar = (await import("chokidar")).default;
-  const geminiProjectsPath = path.join(os.homedir(), ".gemini", "projects");
+  const geminiHome = path.join(os.homedir(), ".gemini");
+  const watchPaths = [
+    path.join(geminiHome, "projects"),
+    path.join(geminiHome, "tmp"),
+  ];
 
   if (projectsWatcher) {
     projectsWatcher.close();
@@ -74,7 +78,7 @@ async function setupProjectsWatcher() {
 
   try {
     // Initialize chokidar watcher with optimized settings
-    projectsWatcher = chokidar.watch(geminiProjectsPath, {
+    projectsWatcher = chokidar.watch(watchPaths, {
       ignored: [
         "**/node_modules/**",
         "**/.git/**",
@@ -112,7 +116,7 @@ async function setupProjectsWatcher() {
             projects: updatedProjects,
             timestamp: new Date().toISOString(),
             changeType: eventType,
-            changedFile: path.relative(geminiProjectsPath, filePath),
+            changedFile: path.relative(geminiHome, filePath),
           });
 
           connectedClients.forEach((client) => {
@@ -764,12 +768,10 @@ app.post("/api/transcribe", authenticateToken, async (req, res) => {
 
       const apiKey = process.env.OPENAI_API_KEY;
       if (!apiKey) {
-        return res
-          .status(500)
-          .json({
-            error:
-              "OpenAI API key not configured. Please set OPENAI_API_KEY in server environment.",
-          });
+        return res.status(500).json({
+          error:
+            "OpenAI API key not configured. Please set OPENAI_API_KEY in server environment.",
+        });
       }
 
       try {

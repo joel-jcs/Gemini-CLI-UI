@@ -3,6 +3,7 @@ import fsSync from "fs";
 import path from "path";
 import readline from "readline";
 import os from "os";
+import crypto from "crypto";
 
 // Helper to get Gemini home directory reliably across platforms
 function getGeminiDir() {
@@ -209,6 +210,96 @@ async function extractProjectDirectory(projectName) {
   }
 }
 
+// Discover native Gemini CLI projects from the tmp directory
+async function discoverNativeProjects() {
+  const tmpDir = path.join(getGeminiDir(), "tmp");
+  const nativeProjects = [];
+
+  try {
+    const entries = await fs.readdir(tmpDir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (entry.isDirectory() && entry.name.length === 64) {
+        // This looks like a project hash folder (64 chars for SHA-256)
+        const projectHashDir = path.join(tmpDir, entry.name);
+        const chatsDir = path.join(projectHashDir, "chats");
+
+        try {
+          // Check if chats directory exists
+          await fs.access(chatsDir);
+
+          // Find the latest session file to extract the project path
+          const sessionFiles = await fs.readdir(chatsDir);
+          const latestSessionFile = sessionFiles
+            .filter((f) => f.startsWith("session-") && f.endsWith(".json"))
+            .sort()
+            .reverse()[0];
+
+          if (latestSessionFile) {
+            const sessionPath = path.join(chatsDir, latestSessionFile);
+            const sessionData = await fs.readFile(sessionPath, "utf8");
+            const session = JSON.parse(sessionData);
+
+            // Extract project path from metadata
+            // Indigenous Gemini CLI sessions usually have 'cwd' or file paths in tool calls
+            let projectPath = null;
+            // Strategy 1: Check root properties
+            if (session.cwd) {
+              projectPath = session.cwd;
+            }
+
+            // Strategy 2: Scan all messages for absolute paths
+            if (!projectPath && session.messages) {
+              for (const msg of session.messages) {
+                // Check all properties of the message for paths
+                const searchTarget = JSON.stringify(msg);
+                const pathMatch = searchTarget.match(
+                  /(?:[A-Z]:\\|\/Users\/)[^\s",'\x1b\x07]+/i,
+                );
+
+                if (pathMatch) {
+                  let foundPath = pathMatch[0].replace(/\\\\/g, "\\");
+                  const parts = foundPath.split(/[\\\/]/).filter(Boolean);
+
+                  // Extract root based on Joely's known structure: Users/joelj/source/repos/...
+                  const reposIndex = parts.findIndex(
+                    (p) => p.toLowerCase() === "repos",
+                  );
+                  if (reposIndex !== -1 && reposIndex + 2 < parts.length) {
+                    // Reassemble from drive to project name folder
+                    const drive = foundPath.match(/^[A-Z]:/i)
+                      ? foundPath.substring(0, 2)
+                      : "";
+                    projectPath = parts.slice(0, reposIndex + 3).join(path.sep);
+                    if (drive && !projectPath.startsWith(drive)) {
+                      projectPath = drive + path.sep + projectPath;
+                    }
+                  }
+                }
+                if (projectPath) break;
+              }
+            }
+
+            if (projectPath) {
+              nativeProjects.push({
+                hash: entry.name,
+                path: projectPath,
+                lastActivity: (await fs.stat(sessionPath)).mtime,
+              });
+            }
+          }
+        } catch (e) {
+          // Skip if chats dir or session file is inaccessible
+        }
+      }
+    }
+  } catch (error) {
+    // console.error('Error discovering native projects:', error);
+  }
+
+  return nativeProjects;
+}
+
 // Load projects from Gemini CLI's projects.json
 async function loadCliProjects() {
   const projectsJsonPath = path.join(getGeminiDir(), "projects.json");
@@ -224,6 +315,7 @@ async function loadCliProjects() {
 async function getProjects() {
   const geminiDir = path.join(getGeminiDir(), "projects");
   const cliProjects = await loadCliProjects();
+  const nativeProjects = await discoverNativeProjects();
   const config = await loadProjectConfig();
   const projects = [];
   const existingProjects = new Set();
@@ -322,6 +414,50 @@ async function getProjects() {
     }
   }
 
+  // Add native projects discovered via tmp hashes
+  for (const nativeProj of nativeProjects) {
+    const normalizedPath = path.resolve(nativeProj.path);
+    const internalId = nativeProj.hash; // Use the native hash as the internal ID
+
+    const alreadyExists = projects.some(
+      (p) => path.resolve(p.path) === normalizedPath,
+    );
+
+    if (!alreadyExists) {
+      const customName = config[internalId]?.displayName;
+      const autoDisplayName = await generateDisplayName(
+        internalId,
+        normalizedPath,
+      );
+
+      const project = {
+        name: internalId,
+        path: normalizedPath,
+        displayName: customName || autoDisplayName,
+        fullPath: normalizedPath,
+        isCustomName: !!customName,
+        isNative: true,
+        sessions: [],
+        sessionMeta: { total: 0, hasMore: false },
+      };
+
+      // Try to get sessions for this native project
+      try {
+        const sessionsResult = await getSessions(internalId, 5, 0);
+        project.sessions = sessionsResult.sessions;
+        project.sessionMeta = {
+          hasMore: sessionsResult.hasMore,
+          total: sessionsResult.total,
+        };
+      } catch (e) {
+        // console.warn(`Could not load sessions for native project ${internalId}:`, e.message);
+      }
+
+      projects.push(project);
+      existingProjects.add(internalId);
+    }
+  }
+
   // Add manually configured projects that don't exist as folders yet
   for (const [projectName, projectConfig] of Object.entries(config)) {
     if (!existingProjects.has(projectName) && projectConfig.manuallyAdded) {
@@ -357,19 +493,35 @@ async function getProjects() {
 }
 
 async function getSessions(projectName, limit = 5, offset = 0) {
-  const projectDir = path.join(getGeminiDir(), "projects", projectName);
+  // Check if this is a native hash (64 chars) or a base64 ID
+  const isNative = projectName.length === 64;
+  let projectDir;
+
+  if (isNative) {
+    projectDir = path.join(getGeminiDir(), "tmp", projectName, "chats");
+  } else {
+    projectDir = path.join(getGeminiDir(), "projects", projectName);
+  }
 
   try {
     const files = await fs.readdir(projectDir);
-    const jsonlFiles = files.filter((file) => file.endsWith(".jsonl"));
+    let sessionFiles;
 
-    if (jsonlFiles.length === 0) {
+    if (isNative) {
+      sessionFiles = files.filter(
+        (file) => file.startsWith("session-") && file.endsWith(".json"),
+      );
+    } else {
+      sessionFiles = files.filter((file) => file.endsWith(".jsonl"));
+    }
+
+    if (sessionFiles.length === 0) {
       return { sessions: [], hasMore: false, total: 0 };
     }
 
     // For performance, get file stats to sort by modification time
     const filesWithStats = await Promise.all(
-      jsonlFiles.map(async (file) => {
+      sessionFiles.map(async (file) => {
         const filePath = path.join(projectDir, file);
         const stats = await fs.stat(filePath);
         return { file, mtime: stats.mtime };
@@ -384,8 +536,15 @@ async function getSessions(projectName, limit = 5, offset = 0) {
 
     // Process files in order of modification time
     for (const { file } of filesWithStats) {
-      const jsonlFile = path.join(projectDir, file);
-      const sessions = await parseJsonlSessions(jsonlFile);
+      const filePath = path.join(projectDir, file);
+      let sessions;
+
+      if (isNative) {
+        const nativeSession = await parseNativeSession(filePath);
+        sessions = nativeSession ? [nativeSession] : [];
+      } else {
+        sessions = await parseJsonlSessions(filePath);
+      }
 
       // Merge sessions, avoiding duplicates by session ID
       sessions.forEach((session) => {
@@ -396,7 +555,7 @@ async function getSessions(projectName, limit = 5, offset = 0) {
 
       processedCount++;
 
-      // Early exit optimization: if we have enough sessions and processed recent files
+      // Early exit optimization
       if (
         allSessions.size >= (limit + offset) * 2 &&
         processedCount >= Math.min(3, filesWithStats.length)
@@ -424,6 +583,33 @@ async function getSessions(projectName, limit = 5, offset = 0) {
   } catch (error) {
     // console.error(`Error reading sessions for project ${projectName}:`, error);
     return { sessions: [], hasMore: false, total: 0 };
+  }
+}
+
+async function parseNativeSession(filePath) {
+  try {
+    const data = await fs.readFile(filePath, "utf8");
+    const session = JSON.parse(data);
+
+    if (!session.messages || session.messages.length === 0) return null;
+
+    // Find first user message for summary
+    const firstUserMsg = session.messages.find((m) => m.type === "user");
+    const summary = firstUserMsg
+      ? firstUserMsg.content.substring(0, 50) +
+        (firstUserMsg.content.length > 50 ? "..." : "")
+      : "Native Session";
+
+    return {
+      id: path.basename(filePath, ".json"),
+      summary: summary,
+      messageCount: session.messages.length,
+      lastActivity: new Date((await fs.stat(filePath)).mtime),
+      cwd: session.cwd || "",
+      isNative: true,
+    };
+  } catch (error) {
+    return null;
   }
 }
 
@@ -507,7 +693,30 @@ async function parseJsonlSessions(filePath) {
 
 // Get messages for a specific session
 async function getSessionMessages(projectName, sessionId) {
-  const projectDir = path.join(getGeminiDir(), "projects", projectName);
+  const isNative = projectName.length === 64;
+  let projectDir;
+
+  if (isNative) {
+    projectDir = path.join(getGeminiDir(), "tmp", projectName, "chats");
+    const sessionFile = path.join(projectDir, `${sessionId}.json`);
+    try {
+      const data = await fs.readFile(sessionFile, "utf8");
+      const session = JSON.parse(data);
+      return (session.messages || []).map((m) => ({
+        sessionId: sessionId,
+        type: m.type,
+        message: {
+          role: m.type,
+          content: m.content,
+        },
+        timestamp: m.timestamp || new Date().toISOString(),
+      }));
+    } catch (e) {
+      return [];
+    }
+  }
+
+  projectDir = path.join(getGeminiDir(), "projects", projectName);
 
   try {
     const files = await fs.readdir(projectDir);
