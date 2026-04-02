@@ -354,17 +354,11 @@ async function getProjects() {
 
         // Try to get sessions for this project (just first 5 for performance)
         try {
-          // Use sessionManager to get sessions for this project
-          const sessionManager = (await import("./sessionManager.js")).default;
-          const allSessions =
-            sessionManager.getProjectSessions(actualProjectDir);
-
-          // Paginate the sessions
-          const paginatedSessions = allSessions.slice(0, 5);
-          project.sessions = paginatedSessions;
+          const sessionsResult = await getSessions(entry.name, 5, 0);
+          project.sessions = sessionsResult.sessions;
           project.sessionMeta = {
-            hasMore: allSessions.length > 5,
-            total: allSessions.length,
+            hasMore: sessionsResult.hasMore,
+            total: sessionsResult.total,
           };
         } catch (e) {
           // console.warn(`Could not load sessions for project ${entry.name}:`, e.message);

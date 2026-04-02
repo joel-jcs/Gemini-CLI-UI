@@ -48,7 +48,6 @@ import {
   clearProjectDirectoryCache,
 } from "./projects.js";
 import { spawnGemini, abortGeminiSession } from "./gemini-cli.js";
-import sessionManager from "./sessionManager.js";
 import gitRoutes from "./routes/git.js";
 import authRoutes from "./routes/auth.js";
 import mcpRoutes from "./routes/mcp.js";
@@ -223,22 +222,16 @@ app.get(
   authenticateToken,
   async (req, res) => {
     try {
-      // Extract the actual project directory path
-      const projectPath = await extractProjectDirectory(req.params.projectName);
-
-      // Get sessions from sessionManager
-      const sessions = sessionManager.getProjectSessions(projectPath);
-
-      // Apply pagination
       const { limit = 5, offset = 0 } = req.query;
-      const paginatedSessions = sessions.slice(
+      const { sessions, total } = await getSessions(
+        req.params.projectName,
+        parseInt(limit),
         parseInt(offset),
-        parseInt(offset) + parseInt(limit),
       );
 
       res.json({
-        sessions: paginatedSessions,
-        total: sessions.length,
+        sessions,
+        total,
       });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -253,7 +246,7 @@ app.get(
   async (req, res) => {
     try {
       const { projectName, sessionId } = req.params;
-      const messages = sessionManager.getSessionMessages(sessionId);
+      const messages = await getSessionMessages(projectName, sessionId);
       res.json({ messages });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -283,7 +276,7 @@ app.delete(
   async (req, res) => {
     try {
       const { projectName, sessionId } = req.params;
-      await sessionManager.deleteSession(sessionId);
+      await deleteSession(projectName, sessionId);
       res.json({ success: true });
     } catch (error) {
       res.status(500).json({ error: error.message });
