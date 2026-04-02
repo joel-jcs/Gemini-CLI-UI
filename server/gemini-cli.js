@@ -2,7 +2,6 @@ import { spawn } from 'child_process';
 import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
-import sessionManager from './sessionManager.js';
 import GeminiResponseHandler from './gemini-response-handler.js';
 
 let activeGeminiProcesses = new Map(); // Track active processes by session ID
@@ -28,21 +27,14 @@ async function spawnGemini(command, options = {}, ws) {
     // Build Gemini CLI command - start with print/resume flags first
     const args = [];
     
+    // Add resume flag if we have a sessionId
+    if (sessionId) {
+      args.push('--resume', sessionId);
+    }
+    
     // Add prompt flag with command if we have a command
     if (command && command.trim()) {
-      // If we have a sessionId, include conversation history
-      if (sessionId) {
-        const context = sessionManager.buildConversationContext(sessionId);
-        if (context) {
-          // Combine context with current command
-          const fullPrompt = context + command;
-          args.push('--prompt', fullPrompt);
-        } else {
-          args.push('--prompt', command);
-        }
-      } else {
-        args.push('--prompt', command);
-      }
+      args.push('--prompt', command);
     }
     
     // Use cwd (actual project directory) instead of projectPath (Gemini's metadata directory)
@@ -234,11 +226,6 @@ async function spawnGemini(command, options = {}, ws) {
       }
     }, timeoutMs);
     
-    // Save user message to session when starting
-    if (command && capturedSessionId) {
-      sessionManager.addMessage(capturedSessionId, 'user', command);
-    }
-    
     // Create response handler for intelligent buffering
     let responseHandler;
     if (ws) {
@@ -258,6 +245,32 @@ async function spawnGemini(command, options = {}, ws) {
       // Debug - Raw Gemini stdout
       hasReceivedOutput = true;
       clearTimeout(timeout);
+
+      // Capture Session ID from output if not already sent
+      if (!sessionCreatedSent) {
+        const sessionMatch = rawOutput.match(/(?:Session ID:|Resuming session:)\s*([a-zA-Z0-9_-]+)/i);
+        if (sessionMatch) {
+          const detectedSessionId = sessionMatch[1];
+          
+          if (capturedSessionId !== detectedSessionId) {
+            const oldSessionId = capturedSessionId || processKey;
+            capturedSessionId = detectedSessionId;
+            
+            // Update process key with captured session ID
+            if (oldSessionId !== capturedSessionId) {
+              activeGeminiProcesses.delete(oldSessionId);
+              activeGeminiProcesses.set(capturedSessionId, geminiProcess);
+              geminiProcess.sessionId = capturedSessionId;
+            }
+          }
+          
+          sessionCreatedSent = true;
+          ws.send(JSON.stringify({
+            type: 'session-created',
+            sessionId: capturedSessionId
+          }));
+        }
+      }
       
       // Filter out debug messages and system messages
       const lines = rawOutput.split('\n');
@@ -295,31 +308,6 @@ async function spawnGemini(command, options = {}, ws) {
             }
           }));
         }
-      }
-      
-      // For new sessions, create a session ID
-      if (!sessionId && !sessionCreatedSent && !capturedSessionId) {
-        capturedSessionId = `gemini_${Date.now()}`;
-        sessionCreatedSent = true;
-        
-        // Create session in session manager
-        sessionManager.createSession(capturedSessionId, cwd || process.cwd());
-        
-        // Save the user message now that we have a session ID
-        if (command) {
-          sessionManager.addMessage(capturedSessionId, 'user', command);
-        }
-        
-        // Update process key with captured session ID
-        if (processKey !== capturedSessionId) {
-          activeGeminiProcesses.delete(processKey);
-          activeGeminiProcesses.set(capturedSessionId, geminiProcess);
-        }
-        
-        ws.send(JSON.stringify({
-          type: 'session-created',
-          sessionId: capturedSessionId
-        }));
       }
     });
     
@@ -359,11 +347,6 @@ async function spawnGemini(command, options = {}, ws) {
       // Clean up process reference
       const finalSessionId = capturedSessionId || sessionId || processKey;
       activeGeminiProcesses.delete(finalSessionId);
-      
-      // Save assistant response to session if we have one
-      if (finalSessionId && fullResponse) {
-        sessionManager.addMessage(finalSessionId, 'assistant', fullResponse);
-      }
       
       ws.send(JSON.stringify({
         type: 'gemini-complete',
