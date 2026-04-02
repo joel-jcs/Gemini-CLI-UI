@@ -153,8 +153,9 @@ export const EnhancedMessageRenderer = ({ content, isDarkMode = true }) => {
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          code: ({ node, inline, className, children, ...props }) => {
-            if (inline) {
+          code: ({ node, className, children, ...props }) => {
+            const isInline = !className && !String(children).includes('\n');
+            if (isInline) {
               return (
                 <code className="px-1.5 py-0.5 mx-0.5 bg-blue-50 dark:bg-gray-800 text-blue-600 dark:text-blue-400 rounded text-xs font-mono">
                   {children}
